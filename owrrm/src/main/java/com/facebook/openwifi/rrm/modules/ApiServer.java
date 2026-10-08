@@ -178,6 +178,35 @@ public class ApiServer implements Runnable {
 	/** The module start time (real time), in ms. */
 	private long startTimeMs;
 
+	/** Device zone lookup API response. */
+	@Schema(description = "Device RF zone lookup result")
+	public static class DeviceZoneResult {
+		/** The device serial number. */
+		@Schema(description = "The device serial number", example = "AP-001")
+		public String serialNumber;
+
+		/** The RF zone. */
+		@Schema(description = "The RF zone", example = "Lobby")
+		public String zone;
+
+		/** Constructor. */
+		public DeviceZoneResult(String serialNumber, String zone) {
+			this.serialNumber = serialNumber;
+			this.zone = zone;
+		}
+	}
+
+	/** Error API response. */
+	@Schema(description = "Error response")
+	public static class ErrorResponse {
+		/** The error message. */
+		@Schema(description = "The error message", example = "Zone not found")
+		public String error;
+
+		/** Constructor. */
+		public ErrorResponse(String error) { this.error = error; }
+	}
+
 	/** Constructor. */
 	public ApiServer(
 		ApiServerParams params,
@@ -287,6 +316,10 @@ public class ApiServer implements Runnable {
 		service.put("/api/v1/runRRM", new RunRRMEndpoint());
 		service.get("/api/v1/getTopology", new GetTopologyEndpoint());
 		service.post("/api/v1/setTopology", new SetTopologyEndpoint());
+		service.get(
+			"/api/v1/device/:serialNumber/zone",
+			new GetDeviceZoneEndpoint()
+		);
 		service.get(
 			"/api/v1/getDeviceLayeredConfig",
 			new GetDeviceLayeredConfigEndpoint()
@@ -503,6 +536,13 @@ public class ApiServer implements Runnable {
 	private String getOpenApiJson(Request request, Response response) {
 		response.type(MediaType.APPLICATION_JSON);
 		return Json.pretty(getOpenApi());
+	}
+
+	/** Return a JSON error response. */
+	private String jsonError(Response response, int status, String error) {
+		response.status(status);
+		response.type(MediaType.APPLICATION_JSON);
+		return gson.toJson(new ErrorResponse(error));
 	}
 
 	@Path("/api/v1/system")
@@ -878,6 +918,76 @@ public class ApiServer implements Runnable {
 				return e.getMessage();
 			}
 			return "";
+		}
+	}
+
+	@Path("/api/v1/device/{serialNumber}/zone")
+	public class GetDeviceZoneEndpoint implements Route {
+		@GET
+		@Produces({ MediaType.APPLICATION_JSON })
+		@Operation(
+			summary = "Get device RF zone",
+			description = "Returns the RF zone for a device serial number from RRM's synchronized topology.",
+			operationId = "getDeviceZone",
+			tags = { "Config" },
+			parameters = {
+				@Parameter(
+					name = "serialNumber",
+					description = "The device serial number",
+					in = ParameterIn.PATH,
+					schema = @Schema(type = "string"),
+					required = true
+				)
+			},
+			responses = {
+				@ApiResponse(
+					responseCode = "200",
+					description = "Device RF zone",
+					content = @Content(
+						schema = @Schema(implementation = DeviceZoneResult.class)
+					)
+				),
+				@ApiResponse(
+					responseCode = "400",
+					description = "Invalid serial number",
+					content = @Content(
+						schema = @Schema(implementation = ErrorResponse.class)
+					)
+				),
+				@ApiResponse(
+					responseCode = "401",
+					description = "Unauthorized"
+				),
+				@ApiResponse(
+					responseCode = "403",
+					description = "Forbidden"
+				),
+				@ApiResponse(
+					responseCode = "404",
+					description = "Zone not found",
+					content = @Content(
+						schema = @Schema(implementation = ErrorResponse.class)
+					)
+				)
+			}
+		)
+		@Override
+		public String handle(
+			@Parameter(hidden = true) Request request,
+			@Parameter(hidden = true) Response response
+		) {
+			String serialNumber = request.params(":serialNumber");
+			if (serialNumber == null || serialNumber.trim().isEmpty()) {
+				return jsonError(response, 400, "Invalid serial number");
+			}
+
+			String zone = deviceDataManager.getZoneForSerial(serialNumber);
+			if (zone == null) {
+				return jsonError(response, 404, "Zone not found");
+			}
+
+			response.type(MediaType.APPLICATION_JSON);
+			return gson.toJson(new DeviceZoneResult(serialNumber, zone));
 		}
 	}
 

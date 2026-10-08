@@ -43,7 +43,7 @@ public class DeviceDataManager {
 	/** The layered device config file. */
 	private final File deviceLayeredConfigFile;
 
-	/** Lock on {@link #topology}. */
+	/** Lock on {@link #topology} and {@link #serialToZone}. */
 	private final ReadWriteLock topologyLock = new ReentrantReadWriteLock();
 
 	/** Lock on {@link #deviceLayeredConfig}. */
@@ -52,6 +52,9 @@ public class DeviceDataManager {
 
 	/** The current device topology. */
 	private DeviceTopology topology;
+
+	/** Reverse index from device serial number to RF zone. */
+	private Map<String, String> serialToZone;
 
 	/** The current layered device config. */
 	private DeviceLayeredConfig deviceLayeredConfig;
@@ -66,6 +69,7 @@ public class DeviceDataManager {
 		this.deviceLayeredConfigFile = null;
 
 		this.topology = new DeviceTopology();
+		this.serialToZone = buildSerialToZone(this.topology);
 		this.deviceLayeredConfig = new DeviceLayeredConfig();
 	}
 
@@ -82,6 +86,7 @@ public class DeviceDataManager {
 
 		// TODO: should we catch exceptions when reading files?
 		this.topology = readTopology(topologyFile);
+		this.serialToZone = buildSerialToZone(this.topology);
 		this.deviceLayeredConfig =
 			readDeviceLayeredConfig(deviceLayeredConfigFile);
 	}
@@ -225,6 +230,18 @@ public class DeviceDataManager {
 		}
 	}
 
+	/** Build a reverse index from device serial number to RF zone. */
+	private Map<String, String> buildSerialToZone(DeviceTopology topo) {
+		Map<String, String> ret = new HashMap<>();
+		for (Map.Entry<String, Set<String>> entry : topo.entrySet()) {
+			String zone = entry.getKey();
+			for (String serialNumber : entry.getValue()) {
+				ret.put(serialNumber, zone);
+			}
+		}
+		return ret;
+	}
+
 	/**
 	 * Sanitized the device layered config, ex. removing empty entries or
 	 * unknown APs/zones.
@@ -273,11 +290,13 @@ public class DeviceDataManager {
 	/** Set the topology. May throw unchecked exceptions upon error. */
 	public void setTopology(DeviceTopology topo) {
 		validateTopology(topo);
+		Map<String, String> newSerialToZone = buildSerialToZone(topo);
 
 		Lock l = topologyLock.writeLock();
 		l.lock();
 		try {
 			this.topology = topo;
+			this.serialToZone = newSerialToZone;
 		} finally {
 			l.unlock();
 		}
@@ -322,22 +341,22 @@ public class DeviceDataManager {
 	}
 
 	/** Return the RF zone for the given device, or null if not found. */
-	public String getDeviceZone(String serialNumber) {
+	public String getZoneForSerial(String serialNumber) {
 		if (serialNumber == null || serialNumber.isEmpty()) {
 			return null;
 		}
 		Lock l = topologyLock.readLock();
 		l.lock();
 		try {
-			for (Map.Entry<String, Set<String>> e : topology.entrySet()) {
-				if (e.getValue().contains(serialNumber)) {
-					return e.getKey();
-				}
-			}
-			return null;
+			return serialToZone.get(serialNumber);
 		} finally {
 			l.unlock();
 		}
+	}
+
+	/** Return the RF zone for the given device, or null if not found. */
+	public String getDeviceZone(String serialNumber) {
+		return getZoneForSerial(serialNumber);
 	}
 
 	/** Return true if the given device is present in the topology. */

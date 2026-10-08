@@ -40,6 +40,44 @@ paths:
             application/json:
               schema:
                 type: object
+  /api/v1/device/{serialNumber}/zone:
+    get:
+      tags:
+      - Config
+      summary: Get device RF zone
+      description: Returns the RF zone for a device serial number from RRM's synchronized
+        topology.
+      operationId: getDeviceZone
+      parameters:
+      - name: serialNumber
+        in: path
+        description: The device serial number
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: Device RF zone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceZoneResult'
+        "400":
+          description: Invalid serial number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden
+        "404":
+          description: Zone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/getDeviceConfig:
     get:
       tags:
@@ -501,6 +539,26 @@ components:
           $ref: '#/components/schemas/DeviceConfig'
     DeviceTopology:
       type: object
+    DeviceZoneResult:
+      type: object
+      description: Device RF zone lookup result
+      properties:
+        serialNumber:
+          type: string
+          description: The device serial number
+          example: AP-001
+        zone:
+          type: string
+          description: The RF zone
+          example: Lobby
+    ErrorResponse:
+      type: object
+      description: Error response
+      properties:
+        error:
+          type: string
+          description: The error message
+          example: Zone not found
     ChannelAllocation:
       type: object
       properties:

@@ -259,6 +259,57 @@ public class ApiServerTest {
 
 	@Test
 	@Order(3)
+	void test_getDeviceZone() throws Exception {
+		final String url = endpoint("/api/v1/device");
+		final String zoneA = "Lobby";
+		final String zoneB = "First Floor";
+		final String deviceA1 = "AP-001";
+		final String deviceA2 = "AP-002";
+		final String deviceB1 = "AP-003";
+
+		DeviceTopology topology = new DeviceTopology();
+		topology.put(zoneA, new TreeSet<>(Arrays.asList(deviceA1, deviceA2)));
+		topology.put(zoneB, new TreeSet<>(Arrays.asList(deviceB1)));
+		deviceDataManager.setTopology(topology);
+
+		HttpResponse<JsonNode> resp =
+			Unirest.get(url + "/" + deviceA1 + "/zone").asJson();
+		assertEquals(200, resp.getStatus());
+		assertTrue(
+			resp.getHeaders().getFirst("Content-Type").startsWith("application/json")
+		);
+		assertEquals(deviceA1, resp.getBody().getObject().getString("serialNumber"));
+		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
+
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone").asJson();
+		assertEquals(200, resp.getStatus());
+		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
+
+		DeviceTopology movedTopology = new DeviceTopology();
+		movedTopology.put(zoneA, new TreeSet<>(Arrays.asList(deviceA1)));
+		movedTopology.put(zoneB, new TreeSet<>(Arrays.asList(deviceA2, deviceB1)));
+		deviceDataManager.setTopology(movedTopology);
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone").asJson();
+		assertEquals(200, resp.getStatus());
+		assertEquals(zoneB, resp.getBody().getObject().getString("zone"));
+
+		resp = Unirest.get(url + "/UNKNOWN-AP/zone").asJson();
+		assertEquals(404, resp.getStatus());
+		assertEquals(
+			"Zone not found",
+			resp.getBody().getObject().getString("error")
+		);
+
+		resp = Unirest.get(url + "/%20/zone").asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
+	}
+
+	@Test
+	@Order(4)
 	void test_getDeviceLayeredConfig() throws Exception {
 		// Create topology and configs
 		final String zone = "test-zone";
@@ -287,7 +338,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(4)
+	@Order(5)
 	void test_getDeviceConfig() throws Exception {
 		String url = endpoint("/api/v1/getDeviceConfig");
 
@@ -318,7 +369,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(5)
+	@Order(6)
 	void test_setDeviceNetworkConfig() throws Exception {
 		DeviceConfig config = new DeviceConfig();
 		config.enableConfig = false;
@@ -337,7 +388,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(6)
+	@Order(7)
 	void test_setDeviceZoneConfig() throws Exception {
 		String url = endpoint("/api/v1/setDeviceZoneConfig");
 
@@ -384,7 +435,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(7)
+	@Order(8)
 	void test_setDeviceApConfig() throws Exception {
 		String url = endpoint("/api/v1/setDeviceApConfig");
 
@@ -431,7 +482,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(8)
+	@Order(9)
 	void test_modifyDeviceApConfig() throws Exception {
 		String url = endpoint("/api/v1/modifyDeviceApConfig");
 
@@ -612,6 +663,7 @@ public class ApiServerTest {
 			jsonResp.getBody().getObject().getJSONObject("paths");
 		assertFalse(paths.isEmpty());
 		assertTrue(paths.keys().next().startsWith("/api/"));
+		assertTrue(paths.has("/api/v1/device/{serialNumber}/zone"));
 	}
 
 	@Test
@@ -769,6 +821,10 @@ public class ApiServerTest {
 		HttpResponse<String> resp =
 			Unirest.get(endpoint("/api/v1/getTopology", false)).asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// bad token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
@@ -779,8 +835,16 @@ public class ApiServerTest {
 		// valid for 300 seconds (5 minutes)
 		String token = "this_is_a_good_token";
 		owSecService.addToken(token, 300);
+		DeviceTopology topology = new DeviceTopology();
+		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
+		deviceDataManager.setTopology(topology);
 		// good token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
+			.header("Authorization", "Bearer " + token)
+			.asString();
+		assertEquals(200, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.header("Authorization", "Bearer " + token)
 			.asString();
 		assertEquals(200, resp.getStatus());
@@ -793,6 +857,10 @@ public class ApiServerTest {
 		// no headers
 		HttpResponse<String> resp =
 			Unirest.get(endpoint("/api/v1/getTopology", true)).asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", true))
+			.asString();
 		assertEquals(403, resp.getStatus());
 
 		// bad headers
