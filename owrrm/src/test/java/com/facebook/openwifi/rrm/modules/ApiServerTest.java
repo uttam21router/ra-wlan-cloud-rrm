@@ -409,6 +409,27 @@ public class ApiServerTest {
 			"Invalid serial number",
 			resp.getBody().getObject().getString("error")
 		);
+
+		resp = Unirest.get(url + "/%20" + deviceA1 + "%20/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
+
+		String longSerial = new String(new char[65]).replace('\0', 'A');
+		resp = Unirest.get(url + "/" + longSerial + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
 	}
 
 	@Test

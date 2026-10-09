@@ -396,6 +396,27 @@ public class ApiServer implements Runnable {
 			path.matches("^/api/v1/device/[^/]+/zone$");
 	}
 
+	/** Return true if the serial number matches Analytics routerId validation. */
+	private boolean isValidPathSafeSerialNumber(String serialNumber) {
+		if (serialNumber == null ||
+			serialNumber.isEmpty() ||
+			serialNumber.length() > 64) {
+			return false;
+		}
+
+		for (int i = 0; i < serialNumber.length(); i++) {
+			char c = serialNumber.charAt(i);
+			if (!((c >= '0' && c <= '9') ||
+				(c >= 'A' && c <= 'Z') ||
+				(c >= 'a' && c <= 'z') ||
+				c == '-' ||
+				c == '_')) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	/**
 	 * Perform OpenWiFi authentication via tokens (external) and API keys
 	 * (internal).
@@ -1044,7 +1065,7 @@ public class ApiServer implements Runnable {
 			}
 
 			String serialNumber = request.params(":serialNumber");
-			if (serialNumber == null || serialNumber.trim().isEmpty()) {
+			if (!isValidPathSafeSerialNumber(serialNumber)) {
 				return jsonError(response, 400, "Invalid serial number");
 			}
 
