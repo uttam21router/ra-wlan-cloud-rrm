@@ -928,6 +928,10 @@ public class ApiServerTest {
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.asString();
 		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Endpoint restricted to internal inter-service communication",
+			new JSONObject(resp.getBody()).getString("error")
+		);
 		resp = Unirest
 			.post(endpoint("/api/v1/setTopology", false))
 			.body("{}")
@@ -963,6 +967,10 @@ public class ApiServerTest {
 			.header("Authorization", "Bearer " + token)
 			.asString();
 		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Endpoint restricted to internal inter-service communication",
+			new JSONObject(resp.getBody()).getString("error")
+		);
 		resp = Unirest
 			.post(endpoint("/api/v1/setTopology", false))
 			.header("Authorization", "Bearer " + token)
@@ -1017,6 +1025,10 @@ public class ApiServerTest {
 			.get(endpoint("/api/v1/device/AP-001/zone", true))
 			.asString();
 		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Forbidden",
+			new JSONObject(resp.getBody()).getString("error")
+		);
 		resp = Unirest
 			.post(endpoint("/api/v1/setTopology", true))
 			.body("{}")

@@ -388,6 +388,14 @@ public class ApiServer implements Runnable {
 		return apiKey != null && apiKey.equals(serviceKey);
 	}
 
+	/** Return true if the endpoint performs its own internal service auth. */
+	private boolean hasRouteLevelInternalServiceAuth(Request request) {
+		String path = request.pathInfo();
+		return path.equals("/api/v1/getTopology") ||
+			path.equals("/api/v1/setTopology") ||
+			path.matches("^/api/v1/device/[^/]+/zone$");
+	}
+
 	/**
 	 * Perform OpenWiFi authentication via tokens (external) and API keys
 	 * (internal).
@@ -480,7 +488,10 @@ public class ApiServer implements Runnable {
 		// OpenWifi auth (if enabled)
 		if (params.useOpenWifiAuth) {
 			// Only protect API endpoints
-			if (request.pathInfo().startsWith("/api/")) {
+			if (
+				request.pathInfo().startsWith("/api/") &&
+				!hasRouteLevelInternalServiceAuth(request)
+			) {
 				this.performOpenWifiAuth(request, response);
 			}
 		}
@@ -1001,12 +1012,11 @@ public class ApiServer implements Runnable {
 					)
 				),
 				@ApiResponse(
-					responseCode = "401",
-					description = "Unauthorized"
-				),
-				@ApiResponse(
 					responseCode = "403",
-					description = "Forbidden"
+					description = "Forbidden",
+					content = @Content(
+						schema = @Schema(implementation = ErrorResponse.class)
+					)
 				),
 				@ApiResponse(
 					responseCode = "404",
