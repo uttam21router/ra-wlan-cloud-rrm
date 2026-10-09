@@ -860,7 +860,7 @@ public class ApiServer implements Runnable {
 		@Produces({ MediaType.APPLICATION_JSON })
 		@Operation(
 			summary = "Get device topology",
-			description = "Returns the device topology.",
+			description = "Returns the device topology. Internal service access only; valid internal credentials are required.",
 			operationId = "getTopology",
 			tags = { "Config" },
 			responses = {
@@ -870,6 +870,13 @@ public class ApiServer implements Runnable {
 					content = @Content(
 						schema = @Schema(implementation = DeviceTopology.class)
 					)
+				),
+				@ApiResponse(
+					responseCode = "403",
+					description = "Forbidden",
+					content = @Content(
+						schema = @Schema(implementation = ErrorResponse.class)
+					)
 				)
 			}
 		)
@@ -878,6 +885,17 @@ public class ApiServer implements Runnable {
 			@Parameter(hidden = true) Request request,
 			@Parameter(hidden = true) Response response
 		) {
+			if (!isInternalRequest(request)) {
+				return jsonError(
+					response,
+					403,
+					"Endpoint restricted to internal inter-service communication"
+				);
+			}
+			if (!hasValidInternalServiceAuth(request)) {
+				return jsonError(response, 403, "Forbidden");
+			}
+
 			response.type(MediaType.APPLICATION_JSON);
 			return deviceDataManager.getTopologyJson();
 		}

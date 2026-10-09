@@ -218,14 +218,42 @@ public class ApiServerTest {
 	@Test
 	@Order(1)
 	void test_getTopology() throws Exception {
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+
 		// Create topology
 		DeviceTopology topology = new DeviceTopology();
 		topology.put("test-zone", new TreeSet<>(Arrays.asList("aaaaaaaaaaa")));
 		deviceDataManager.setTopology(topology);
 
-		// Fetch topology
-		HttpResponse<String> resp =
-			Unirest.get(endpoint("/api/v1/getTopology")).asString();
+		// External listener cannot access topology, even with internal headers
+		HttpResponse<String> resp = Unirest
+			.get(endpoint("/api/v1/getTopology", false))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(403, resp.getStatus());
+
+		// Internal listener still requires service credentials when auth is off
+		resp = Unirest.get(endpoint("/api/v1/getTopology")).asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest.get(endpoint("/api/v1/getTopology"))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.asString();
+		assertEquals(403, resp.getStatus());
+
+		// Fetch topology with valid internal service credentials
+		resp = Unirest.get(endpoint("/api/v1/getTopology"))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
 		assertEquals(200, resp.getStatus());
 		assertEquals(deviceDataManager.getTopologyJson(), resp.getBody());
 	}
@@ -863,7 +891,7 @@ public class ApiServerTest {
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
 			.header("Authorization", "Bearer " + token)
 			.asString();
-		assertEquals(200, resp.getStatus());
+		assertEquals(403, resp.getStatus());
 		// public endpoint cannot access internal-only device zone lookup, even with good token
 		resp = Unirest
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
@@ -873,6 +901,15 @@ public class ApiServerTest {
 
 		final String validKey =
 			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		resp = Unirest
+			.get(endpoint("/api/v1/getTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(403, resp.getStatus());
 		resp = Unirest
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
@@ -906,15 +943,16 @@ public class ApiServerTest {
 		// good headers
 		final String validKey =
 			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		DeviceTopology topology = new DeviceTopology();
+		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
+		deviceDataManager.setTopology(topology);
+
 		resp = Unirest.get(endpoint("/api/v1/getTopology", true))
 			.header("X-INTERNAL-NAME", "internal_name")
 			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(200, resp.getStatus());
-
-		DeviceTopology topology = new DeviceTopology();
-		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
-		deviceDataManager.setTopology(topology);
+		assertEquals(deviceDataManager.getTopologyJson(), resp.getBody());
 
 		resp = Unirest.get(endpoint("/api/v1/device/AP-001/zone", true))
 			.header("X-INTERNAL-NAME", "internal_name")

@@ -121,7 +121,8 @@ paths:
       tags:
       - Config
       summary: Get device topology
-      description: Returns the device topology.
+      description: Returns the device topology. Internal service access only; valid
+        internal credentials are required.
       operationId: getTopology
       responses:
         "200":
@@ -130,6 +131,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeviceTopology'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/modifyDeviceApConfig:
     post:
       tags:
