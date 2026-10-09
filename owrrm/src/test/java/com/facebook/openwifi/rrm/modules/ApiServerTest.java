@@ -843,11 +843,12 @@ public class ApiServerTest {
 			.header("Authorization", "Bearer " + token)
 			.asString();
 		assertEquals(200, resp.getStatus());
+		// public endpoint cannot access internal-only device zone lookup, even with good token
 		resp = Unirest
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.header("Authorization", "Bearer " + token)
 			.asString();
-		assertEquals(200, resp.getStatus());
+		assertEquals(403, resp.getStatus());
 	}
 
 	@Test
@@ -871,12 +872,21 @@ public class ApiServerTest {
 		assertEquals(403, resp.getStatus());
 
 		// good headers
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
 		resp = Unirest.get(endpoint("/api/v1/getTopology", true))
 			.header("X-INTERNAL-NAME", "internal_name")
-			.header(
-				"X-API-KEY",
-				Utils.generateServiceKey(rrmConfig.serviceConfig)
-			)
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(200, resp.getStatus());
+
+		DeviceTopology topology = new DeviceTopology();
+		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
+		deviceDataManager.setTopology(topology);
+
+		resp = Unirest.get(endpoint("/api/v1/device/AP-001/zone", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(200, resp.getStatus());
 	}

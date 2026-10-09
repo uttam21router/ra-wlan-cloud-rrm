@@ -976,6 +976,16 @@ public class ApiServer implements Runnable {
 			@Parameter(hidden = true) Request request,
 			@Parameter(hidden = true) Response response
 		) {
+			int port = request.port();
+			boolean internal = port > 0 && port == params.internalHttpPort;
+			if (!internal) {
+				return jsonError(
+					response,
+					403,
+					"Endpoint restricted to internal inter-service communication"
+				);
+			}
+
 			String serialNumber = request.params(":serialNumber");
 			if (serialNumber == null || serialNumber.trim().isEmpty()) {
 				return jsonError(response, 400, "Invalid serial number");
