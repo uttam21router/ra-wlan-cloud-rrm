@@ -272,8 +272,17 @@ public class ApiServerTest {
 		topology.put(zoneB, new TreeSet<>(Arrays.asList(deviceB1)));
 		deviceDataManager.setTopology(topology);
 
+		HttpResponse<String> stringResp =
+			Unirest.get(url + "/" + deviceA1 + "/zone").asString();
+		assertEquals(403, stringResp.getStatus());
+
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
 		HttpResponse<JsonNode> resp =
-			Unirest.get(url + "/" + deviceA1 + "/zone").asJson();
+			Unirest.get(url + "/" + deviceA1 + "/zone")
+				.header("X-INTERNAL-NAME", "internal_name")
+				.header("X-API-KEY", validKey)
+				.asJson();
 		assertEquals(200, resp.getStatus());
 		assertTrue(
 			resp.getHeaders().getFirst("Content-Type").startsWith("application/json")
@@ -281,7 +290,10 @@ public class ApiServerTest {
 		assertEquals(deviceA1, resp.getBody().getObject().getString("serialNumber"));
 		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
 
-		resp = Unirest.get(url + "/" + deviceA2 + "/zone").asJson();
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
 		assertEquals(200, resp.getStatus());
 		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
 
@@ -289,18 +301,27 @@ public class ApiServerTest {
 		movedTopology.put(zoneA, new TreeSet<>(Arrays.asList(deviceA1)));
 		movedTopology.put(zoneB, new TreeSet<>(Arrays.asList(deviceA2, deviceB1)));
 		deviceDataManager.setTopology(movedTopology);
-		resp = Unirest.get(url + "/" + deviceA2 + "/zone").asJson();
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
 		assertEquals(200, resp.getStatus());
 		assertEquals(zoneB, resp.getBody().getObject().getString("zone"));
 
-		resp = Unirest.get(url + "/UNKNOWN-AP/zone").asJson();
+		resp = Unirest.get(url + "/UNKNOWN-AP/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
 		assertEquals(404, resp.getStatus());
 		assertEquals(
 			"Zone not found",
 			resp.getBody().getObject().getString("error")
 		);
 
-		resp = Unirest.get(url + "/%20/zone").asJson();
+		resp = Unirest.get(url + "/%20/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
 		assertEquals(400, resp.getStatus());
 		assertEquals(
 			"Invalid serial number",
@@ -847,6 +868,17 @@ public class ApiServerTest {
 		resp = Unirest
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.header("Authorization", "Bearer " + token)
+			.asString();
+		assertEquals(403, resp.getStatus());
+
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(403, resp.getStatus());
 	}

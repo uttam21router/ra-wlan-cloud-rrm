@@ -371,6 +371,23 @@ public class ApiServer implements Runnable {
 			: String.format("%s?%s", path, queryString);
 	}
 
+	/** Return true if the request arrived on the internal listener. */
+	private boolean isInternalRequest(Request request) {
+		int port = request.raw().getLocalPort();
+		return port > 0 && port == params.internalHttpPort;
+	}
+
+	/** Return true if the request has valid internal service credentials. */
+	private boolean hasValidInternalServiceAuth(Request request) {
+		String internalName = request.headers("X-INTERNAL-NAME");
+		if (internalName == null) {
+			return false;
+		}
+
+		String apiKey = request.headers("X-API-KEY");
+		return apiKey != null && apiKey.equals(serviceKey);
+	}
+
 	/**
 	 * Perform OpenWiFi authentication via tokens (external) and API keys
 	 * (internal).
@@ -379,17 +396,10 @@ public class ApiServer implements Runnable {
 	 * HTTP 403 response and return false.
 	 */
 	private boolean performOpenWifiAuth(Request request, Response response) {
-		int port = request.port();
-		boolean internal = port > 0 && port == params.internalHttpPort;
-		if (internal) {
-			String internalName = request.headers("X-INTERNAL-NAME");
-			if (internalName != null) {
-				// Internal request, validate "X-API-KEY"
-				String apiKey = request.headers("X-API-KEY");
-				if (apiKey != null && apiKey.equals(serviceKey)) {
-					// auth success
-					return true;
-				}
+		if (isInternalRequest(request)) {
+			if (hasValidInternalServiceAuth(request)) {
+				// auth success
+				return true;
 			}
 		} else {
 			// External request, validate token:
@@ -976,14 +986,15 @@ public class ApiServer implements Runnable {
 			@Parameter(hidden = true) Request request,
 			@Parameter(hidden = true) Response response
 		) {
-			int port = request.port();
-			boolean internal = port > 0 && port == params.internalHttpPort;
-			if (!internal) {
+			if (!isInternalRequest(request)) {
 				return jsonError(
 					response,
 					403,
 					"Endpoint restricted to internal inter-service communication"
 				);
+			}
+			if (!hasValidInternalServiceAuth(request)) {
+				return jsonError(response, 403, "Forbidden");
 			}
 
 			String serialNumber = request.params(":serialNumber");
