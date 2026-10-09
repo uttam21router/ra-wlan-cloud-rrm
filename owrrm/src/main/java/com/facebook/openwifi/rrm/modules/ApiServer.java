@@ -907,7 +907,7 @@ public class ApiServer implements Runnable {
 		@Produces({ MediaType.APPLICATION_JSON })
 		@Operation(
 			summary = "Set device topology",
-			description = "Set the device topology.",
+			description = "Set the device topology. Internal service access only; valid internal credentials are required.",
 			operationId = "setTopology",
 			tags = { "Config" },
 			requestBody = @RequestBody(
@@ -922,7 +922,14 @@ public class ApiServer implements Runnable {
 			),
 			responses = {
 				@ApiResponse(responseCode = "200", description = "Success"),
-				@ApiResponse(responseCode = "400", description = "Bad Request")
+				@ApiResponse(responseCode = "400", description = "Bad Request"),
+				@ApiResponse(
+					responseCode = "403",
+					description = "Forbidden",
+					content = @Content(
+						schema = @Schema(implementation = ErrorResponse.class)
+					)
+				)
 			}
 		)
 		@Override
@@ -930,6 +937,17 @@ public class ApiServer implements Runnable {
 			@Parameter(hidden = true) Request request,
 			@Parameter(hidden = true) Response response
 		) {
+			if (!isInternalRequest(request)) {
+				return jsonError(
+					response,
+					403,
+					"Endpoint restricted to internal inter-service communication"
+				);
+			}
+			if (!hasValidInternalServiceAuth(request)) {
+				return jsonError(response, 403, "Forbidden");
+			}
+
 			// TODO - block if "ProvMonitorParams.useVenues" is enabled?
 			try {
 				DeviceTopology topology =

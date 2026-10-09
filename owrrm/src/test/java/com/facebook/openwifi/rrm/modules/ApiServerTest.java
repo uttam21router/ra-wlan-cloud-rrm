@@ -11,6 +11,7 @@ package com.facebook.openwifi.rrm.modules;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -262,14 +263,62 @@ public class ApiServerTest {
 	@Order(2)
 	void test_setTopology() throws Exception {
 		String url = endpoint("/api/v1/setTopology");
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
 
-		// Create topology
+		// Create existing and replacement topologies
+		DeviceTopology existingTopology = new DeviceTopology();
+		existingTopology.put(
+			"existing-zone",
+			new TreeSet<>(Arrays.asList("existing-ap"))
+		);
+		deviceDataManager.setTopology(existingTopology);
+		String existingTopologyJson = deviceDataManager.getTopologyJson();
+
 		DeviceTopology topology = new DeviceTopology();
 		topology.put("test-zone", new TreeSet<>(Arrays.asList("aaaaaaaaaaa")));
 
-		// Set topology
+		// Unauthorized requests cannot mutate topology when auth is disabled
 		HttpResponse<String> resp = Unirest
 			.post(url)
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertEquals(
+			"existing-zone",
+			deviceDataManager.getZoneForSerial("existing-ap")
+		);
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		resp = Unirest
+			.post(url)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		// Set topology with valid internal service credentials
+		resp = Unirest
+			.post(url)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
 			.body(gson.toJson(topology))
 			.asString();
 		assertEquals(200, resp.getStatus());
@@ -281,7 +330,12 @@ public class ApiServerTest {
 		// Missing/wrong parameters
 		assertEquals(
 			400,
-			Unirest.post(url).body("not json").asString().getStatus()
+			Unirest.post(url)
+				.header("X-INTERNAL-NAME", "internal_name")
+				.header("X-API-KEY", validKey)
+				.body("not json")
+				.asString()
+				.getStatus()
 		);
 	}
 
@@ -874,6 +928,11 @@ public class ApiServerTest {
 			.get(endpoint("/api/v1/device/AP-001/zone", false))
 			.asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.body("{}")
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// bad token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
@@ -887,6 +946,12 @@ public class ApiServerTest {
 		DeviceTopology topology = new DeviceTopology();
 		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
 		deviceDataManager.setTopology(topology);
+		String originalTopologyJson = deviceDataManager.getTopologyJson();
+		DeviceTopology maliciousTopology = new DeviceTopology();
+		maliciousTopology.put(
+			"malicious-zone",
+			new TreeSet<>(Arrays.asList("AP-MALICIOUS"))
+		);
 		// good token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
 			.header("Authorization", "Bearer " + token)
@@ -898,6 +963,14 @@ public class ApiServerTest {
 			.header("Authorization", "Bearer " + token)
 			.asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("Authorization", "Bearer " + token)
+			.body(gson.toJson(maliciousTopology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(originalTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("AP-MALICIOUS"));
 
 		final String validKey =
 			Utils.generateServiceKey(rrmConfig.serviceConfig);
@@ -918,6 +991,18 @@ public class ApiServerTest {
 			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(maliciousTopology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(originalTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("AP-MALICIOUS"));
 	}
 
 	@Test
@@ -932,11 +1017,22 @@ public class ApiServerTest {
 			.get(endpoint("/api/v1/device/AP-001/zone", true))
 			.asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", true))
+			.body("{}")
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// bad headers
 		resp = Unirest.get(endpoint("/api/v1/getTopology", true))
 			.header("X-INTERNAL-NAME", "internal_name")
 			.header("X-API-KEY", "not_a_valid_key")
+			.asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest.post(endpoint("/api/v1/setTopology", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.body("{}")
 			.asString();
 		assertEquals(403, resp.getStatus());
 
@@ -959,5 +1055,18 @@ public class ApiServerTest {
 			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(200, resp.getStatus());
+
+		DeviceTopology updatedTopology = new DeviceTopology();
+		updatedTopology.put(
+			"updated-zone",
+			new TreeSet<>(Arrays.asList("AP-UPDATED"))
+		);
+		resp = Unirest.post(endpoint("/api/v1/setTopology", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(updatedTopology))
+			.asString();
+		assertEquals(200, resp.getStatus());
+		assertEquals(gson.toJson(updatedTopology), deviceDataManager.getTopologyJson());
 	}
 }

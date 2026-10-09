@@ -422,7 +422,8 @@ paths:
       tags:
       - Config
       summary: Set device topology
-      description: Set the device topology.
+      description: Set the device topology. Internal service access only; valid
+        internal credentials are required.
       operationId: setTopology
       requestBody:
         description: The device topology
@@ -436,6 +437,12 @@ paths:
           description: Success
         "400":
           description: Bad Request
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   schemas:
     Algorithm:
