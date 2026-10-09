@@ -287,15 +287,21 @@ public class DeviceDataManager {
 		return modified;
 	}
 
-	/** Set the topology. May throw unchecked exceptions upon error. */
+	/**
+	 * Set the topology. May throw unchecked exceptions upon error.
+	 *
+	 * The supplied topology is copied before publication, and callers must not
+	 * mutate it concurrently while this method is copying it.
+	 */
 	public void setTopology(DeviceTopology topo) {
-		validateTopology(topo);
-		Map<String, String> newSerialToZone = buildSerialToZone(topo);
+		DeviceTopology topologyCopy = new DeviceTopology(topo);
+		validateTopology(topologyCopy);
+		Map<String, String> newSerialToZone = buildSerialToZone(topologyCopy);
 
 		Lock l = topologyLock.writeLock();
 		l.lock();
 		try {
-			this.topology = topo;
+			this.topology = topologyCopy;
 			this.serialToZone = newSerialToZone;
 		} finally {
 			l.unlock();

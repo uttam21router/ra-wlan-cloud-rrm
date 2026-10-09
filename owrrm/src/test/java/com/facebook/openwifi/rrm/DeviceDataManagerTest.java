@@ -19,6 +19,7 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -190,6 +191,51 @@ public class DeviceDataManagerTest {
 
 	@Test
 	@Order(5)
+	void testSetTopologyCopiesOriginalTopology() throws Exception {
+		final String zoneA = "Zone-A";
+		final String zoneB = "Zone-B";
+		final String device1 = "AP1";
+		final String device2 = "AP2";
+
+		DeviceDataManager deviceDataManager = new DeviceDataManager();
+		DeviceTopology topology = new DeviceTopology();
+		topology.put(zoneA, new TreeSet<>(Arrays.asList(device1)));
+
+		deviceDataManager.setTopology(topology);
+		topology.put(zoneB, new TreeSet<>(Arrays.asList(device2)));
+
+		assertEquals(zoneA, deviceDataManager.getZoneForSerial(device1));
+		assertNull(deviceDataManager.getZoneForSerial(device2));
+		assertFalse(deviceDataManager.isZoneInTopology(zoneB));
+		assertFalse(deviceDataManager.getTopologyJson().contains(device2));
+		assertFalse(deviceDataManager.getTopologyJson().contains(zoneB));
+	}
+
+	@Test
+	@Order(6)
+	void testSetTopologyCopiesNestedDeviceSets() throws Exception {
+		final String zoneA = "Zone-A";
+		final String device1 = "AP1";
+		final String device2 = "AP2";
+
+		DeviceDataManager deviceDataManager = new DeviceDataManager();
+		Set<String> devices = new TreeSet<>();
+		devices.add(device1);
+		DeviceTopology topology = new DeviceTopology();
+		topology.put(zoneA, devices);
+
+		deviceDataManager.setTopology(topology);
+		devices.add(device2);
+		devices.remove(device1);
+
+		assertEquals(zoneA, deviceDataManager.getZoneForSerial(device1));
+		assertNull(deviceDataManager.getZoneForSerial(device2));
+		assertTrue(deviceDataManager.isDeviceInTopology(device1));
+		assertFalse(deviceDataManager.isDeviceInTopology(device2));
+	}
+
+	@Test
+	@Order(7)
 	void testReverseZoneIndexFromDisk(@TempDir Path tempDir) throws Exception {
 		final String zone = "test-zone";
 		final String device = "aaaaaaaaaa01";
@@ -206,7 +252,7 @@ public class DeviceDataManagerTest {
 	}
 
 	@Test
-	@Order(6)
+	@Order(8)
 	void testConcurrentTopologyUpdatesAndLookups() throws Exception {
 		final String zoneA = "test-zone-A";
 		final String zoneB = "test-zone-B";
