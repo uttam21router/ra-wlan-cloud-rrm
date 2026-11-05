@@ -11,6 +11,7 @@ package com.facebook.openwifi.rrm.modules;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -42,8 +43,12 @@ import com.facebook.openwifi.rrm.RRMConfig;
 import com.facebook.openwifi.rrm.VersionProvider;
 import com.facebook.openwifi.rrm.mysql.DatabaseManager;
 import com.facebook.openwifi.rrm.services.MockOWSecService;
+import com.facebook.openwifi.rrm.services.MockOWGWService;
+import com.facebook.openwifi.cloudsdk.UCentralApConfiguration;
 import com.facebook.openwifi.rrm.Utils;
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.facebook.openwifi.cloudsdk.kafka.UCentralKafkaConsumer.KafkaRecord;
 
 import kong.unirest.HttpResponse;
 import kong.unirest.JsonNode;
@@ -83,6 +88,8 @@ public class ApiServerTest {
 
 	/** Test modeler instance. */
 	private Modeler modeler;
+	private TestWifiClient wifiClient;
+	private ConfigManager configManager;
 
 	/** The Gson instance. */
 	private final Gson gson = new Gson();
@@ -112,7 +119,8 @@ public class ApiServerTest {
 		rrmConfig.moduleConfig.apiServerParams.externalHttpPort =
 			TEST_EXTERNAL_PORT;
 
-		UCentralClient client = null;
+		this.wifiClient = new TestWifiClient();
+		UCentralClient client = wifiClient;
 
 		boolean useAuth = testInfo.getTags().contains("auth");
 		if (useAuth) {
@@ -126,16 +134,6 @@ public class ApiServerTest {
 			}
 
 			// Create uCentral client with mock services as necessary
-			client = new UCentralClient(
-				"rrm",
-				false,
-				null,
-				null,
-				null,
-				rrmConfig.uCentralConfig.uCentralSocketParams.connectTimeoutMs,
-				rrmConfig.uCentralConfig.uCentralSocketParams.socketTimeoutMs,
-				rrmConfig.uCentralConfig.uCentralSocketParams.wifiScanTimeoutMs
-			);
 			ServiceEvent owsecServiceEvent = new ServiceEvent();
 			owsecServiceEvent.type = "owsec";
 			owsecServiceEvent.privateEndPoint =
@@ -154,7 +152,7 @@ public class ApiServerTest {
 		);
 
 		// Instantiate dependent instances
-		ConfigManager configManager = new ConfigManager(
+		this.configManager = new ConfigManager(
 			rrmConfig.moduleConfig.configManagerParams,
 			deviceDataManager,
 			client
@@ -218,14 +216,42 @@ public class ApiServerTest {
 	@Test
 	@Order(1)
 	void test_getTopology() throws Exception {
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+
 		// Create topology
 		DeviceTopology topology = new DeviceTopology();
 		topology.put("test-zone", new TreeSet<>(Arrays.asList("aaaaaaaaaaa")));
 		deviceDataManager.setTopology(topology);
 
-		// Fetch topology
-		HttpResponse<String> resp =
-			Unirest.get(endpoint("/api/v1/getTopology")).asString();
+		// External listener cannot access topology, even with internal headers
+		HttpResponse<String> resp = Unirest
+			.get(endpoint("/api/v1/getTopology", false))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(403, resp.getStatus());
+
+		// Internal listener still requires service credentials when auth is off
+		resp = Unirest.get(endpoint("/api/v1/getTopology")).asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest.get(endpoint("/api/v1/getTopology"))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.asString();
+		assertEquals(403, resp.getStatus());
+
+		// Fetch topology with valid internal service credentials
+		resp = Unirest.get(endpoint("/api/v1/getTopology"))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
 		assertEquals(200, resp.getStatus());
 		assertEquals(deviceDataManager.getTopologyJson(), resp.getBody());
 	}
@@ -234,14 +260,62 @@ public class ApiServerTest {
 	@Order(2)
 	void test_setTopology() throws Exception {
 		String url = endpoint("/api/v1/setTopology");
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
 
-		// Create topology
+		// Create existing and replacement topologies
+		DeviceTopology existingTopology = new DeviceTopology();
+		existingTopology.put(
+			"existing-zone",
+			new TreeSet<>(Arrays.asList("existing-ap"))
+		);
+		deviceDataManager.setTopology(existingTopology);
+		String existingTopologyJson = deviceDataManager.getTopologyJson();
+
 		DeviceTopology topology = new DeviceTopology();
 		topology.put("test-zone", new TreeSet<>(Arrays.asList("aaaaaaaaaaa")));
 
-		// Set topology
+		// Unauthorized requests cannot mutate topology when auth is disabled
 		HttpResponse<String> resp = Unirest
 			.post(url)
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertEquals(
+			"existing-zone",
+			deviceDataManager.getZoneForSerial("existing-ap")
+		);
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		resp = Unirest
+			.post(url)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(topology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(existingTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("aaaaaaaaaaa"));
+
+		// Set topology with valid internal service credentials
+		resp = Unirest
+			.post(url)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
 			.body(gson.toJson(topology))
 			.asString();
 		assertEquals(200, resp.getStatus());
@@ -253,12 +327,131 @@ public class ApiServerTest {
 		// Missing/wrong parameters
 		assertEquals(
 			400,
-			Unirest.post(url).body("not json").asString().getStatus()
+			Unirest.post(url)
+				.header("X-INTERNAL-NAME", "internal_name")
+				.header("X-API-KEY", validKey)
+				.body("not json")
+				.asString()
+				.getStatus()
+		);
+
+		String validTopologyJson = deviceDataManager.getTopologyJson();
+		resp = Unirest.post(url)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body("{\"zone-1\":null}")
+			.asString();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Device list cannot be null for zone 'zone-1'",
+			resp.getBody()
+		);
+		assertEquals(validTopologyJson, deviceDataManager.getTopologyJson());
+		assertEquals(
+			"test-zone",
+			deviceDataManager.getZoneForSerial("aaaaaaaaaaa")
 		);
 	}
 
 	@Test
 	@Order(3)
+	void test_getDeviceZone() throws Exception {
+		final String url = endpoint("/api/v1/device");
+		final String zoneA = "Lobby";
+		final String zoneB = "First Floor";
+		final String deviceA1 = "AP-001";
+		final String deviceA2 = "AP-002";
+		final String deviceB1 = "AP-003";
+
+		DeviceTopology topology = new DeviceTopology();
+		topology.put(zoneA, new TreeSet<>(Arrays.asList(deviceA1, deviceA2)));
+		topology.put(zoneB, new TreeSet<>(Arrays.asList(deviceB1)));
+		deviceDataManager.setTopology(topology);
+
+		HttpResponse<String> stringResp =
+			Unirest.get(url + "/" + deviceA1 + "/zone").asString();
+		assertEquals(403, stringResp.getStatus());
+
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		HttpResponse<JsonNode> resp =
+			Unirest.get(url + "/" + deviceA1 + "/zone")
+				.header("X-INTERNAL-NAME", "internal_name")
+				.header("X-API-KEY", validKey)
+				.asJson();
+		assertEquals(200, resp.getStatus());
+		assertTrue(
+			resp.getHeaders().getFirst("Content-Type").startsWith("application/json")
+		);
+		assertEquals(
+			deviceA1,
+			resp.getBody().getObject().getString("serialNumber")
+		);
+		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
+
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(200, resp.getStatus());
+		assertEquals(zoneA, resp.getBody().getObject().getString("zone"));
+
+		DeviceTopology movedTopology = new DeviceTopology();
+		movedTopology.put(zoneA, new TreeSet<>(Arrays.asList(deviceA1)));
+		movedTopology
+			.put(zoneB, new TreeSet<>(Arrays.asList(deviceA2, deviceB1)));
+		deviceDataManager.setTopology(movedTopology);
+		resp = Unirest.get(url + "/" + deviceA2 + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(200, resp.getStatus());
+		assertEquals(zoneB, resp.getBody().getObject().getString("zone"));
+
+		resp = Unirest.get(url + "/UNKNOWN-AP/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(404, resp.getStatus());
+		assertEquals(
+			"Zone not found",
+			resp.getBody().getObject().getString("error")
+		);
+
+		resp = Unirest.get(url + "/%20/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
+
+		resp = Unirest.get(url + "/%20" + deviceA1 + "%20/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
+
+		String longSerial = new String(new char[65]).replace('\0', 'A');
+		resp = Unirest.get(url + "/" + longSerial + "/zone")
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asJson();
+		assertEquals(400, resp.getStatus());
+		assertEquals(
+			"Invalid serial number",
+			resp.getBody().getObject().getString("error")
+		);
+	}
+
+	@Test
+	@Order(4)
 	void test_getDeviceLayeredConfig() throws Exception {
 		// Create topology and configs
 		final String zone = "test-zone";
@@ -287,7 +480,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(4)
+	@Order(5)
 	void test_getDeviceConfig() throws Exception {
 		String url = endpoint("/api/v1/getDeviceConfig");
 
@@ -318,7 +511,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(5)
+	@Order(6)
 	void test_setDeviceNetworkConfig() throws Exception {
 		DeviceConfig config = new DeviceConfig();
 		config.enableConfig = false;
@@ -337,7 +530,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(6)
+	@Order(7)
 	void test_setDeviceZoneConfig() throws Exception {
 		String url = endpoint("/api/v1/setDeviceZoneConfig");
 
@@ -384,7 +577,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(7)
+	@Order(8)
 	void test_setDeviceApConfig() throws Exception {
 		String url = endpoint("/api/v1/setDeviceApConfig");
 
@@ -431,7 +624,7 @@ public class ApiServerTest {
 	}
 
 	@Test
-	@Order(8)
+	@Order(9)
 	void test_modifyDeviceApConfig() throws Exception {
 		String url = endpoint("/api/v1/modifyDeviceApConfig");
 
@@ -492,6 +685,380 @@ public class ApiServerTest {
 		assertEquals(
 			400,
 			Unirest.post(url + "?serial=" + ap).body("{}").asString().getStatus()
+		);
+	}
+
+	private void wifiTopology() {
+		DeviceTopology topology = new DeviceTopology();
+		topology.put(
+			"wifi-zone",
+			new TreeSet<>(Arrays.asList(TestWifiClient.SERIAL, "other-device"))
+		);
+		deviceDataManager.setTopology(topology);
+	}
+
+	private kong.unirest.HttpRequestWithBody wifiPut(String serial) {
+		return Unirest
+			.put(endpoint("/api/v1/device/" + serial + "/wifi/bandwidth"))
+			.header("X-INTERNAL-NAME", "mcp-test")
+			.header(
+				"X-API-KEY",
+				Utils.generateServiceKey(rrmConfig.serviceConfig)
+			)
+			.header("Content-Type", "application/json");
+	}
+
+	private kong.unirest.HttpRequestWithBody wifiPost() {
+		return Unirest.post(
+			endpoint("/api/v1/device/" + TestWifiClient.SERIAL + "/wifiScan")
+		)
+			.header("X-INTERNAL-NAME", "mcp-test")
+			.header(
+				"X-API-KEY",
+				Utils.generateServiceKey(rrmConfig.serviceConfig)
+			);
+	}
+
+	private HttpResponse<String> wifiResults(String serial) {
+		return Unirest
+			.get(endpoint("/api/v1/device/" + serial + "/wifiScanResults"))
+			.header("X-INTERNAL-NAME", "mcp-test")
+			.header(
+				"X-API-KEY",
+				Utils.generateServiceKey(rrmConfig.serviceConfig)
+			)
+			.asString();
+	}
+
+	@Test
+	void wifiBandwidthHttpContract() {
+		wifiTopology();
+		assertEquals(
+			200,
+			wifiPut(TestWifiClient.SERIAL).body("{\"band\":\"2g\",\"bandwidth\":\"HT20\"}").asString().getStatus()
+		);
+		HttpResponse<String> accepted = wifiPut(TestWifiClient.SERIAL)
+			.body("{\"band\":\"2g\",\"bandwidth\":\"HT40\"}")
+			.asString();
+		assertEquals(202, accepted.getStatus());
+		assertTrue(new JSONObject(accepted.getBody()).getBoolean("success"));
+		configManager.runImpl();
+		assertEquals(1, wifiClient.configurations.size());
+		for (
+			String body : Arrays.asList(
+				"null",
+				"{}",
+				"[]",
+				"bad json",
+				"{\"band\":\"5g\",\"bandwidth\":\"HT40\"}",
+				"{\"band\":\"2g\",\"bandwidth\":\"HT80\"}",
+				"{\"band\":\"2g\",\"bandwidth\":\"invalid\"}"
+			)
+		) {
+			assertEquals(
+				400,
+				wifiPut(TestWifiClient.SERIAL).body(body).asString().getStatus(), body
+			);
+		}
+		assertEquals(404, wifiPut("unknown").body("{}").asString().getStatus());
+		assertEquals(
+			400,
+			wifiPut("bad.serial").body("{}").asString().getStatus()
+		);
+		rrmConfig.moduleConfig.configManagerParams.configEnabled = false;
+		assertEquals(
+			409,
+			wifiPut(TestWifiClient.SERIAL).body("{\"band\":\"2g\",\"bandwidth\":\"HT40\"}").asString().getStatus()
+		);
+	}
+
+	@Test
+	void wifiBandwidthEndpointPersistsAndDeliversUsingRealSdkToMockGateway()
+		throws Exception {
+		wifiTopology();
+		try (MockOWGWService gateway = new MockOWGWService()) {
+			gateway.connect(wifiClient);
+			wifiClient.useHttpCommands = true;
+			gateway.responseBody =
+				"{\"errorCode\":0,\"status\":\"gateway-specific-success\"}";
+			assertEquals(
+				202,
+				wifiPut(TestWifiClient.SERIAL)
+					.body("{\"band\":\"2g\",\"bandwidth\":\"HT40\"}")
+					.asString()
+					.getStatus()
+			);
+			assertEquals(
+				40,
+				deviceDataManager.getDeviceConfig(TestWifiClient.SERIAL).userChannelWidths.get("2G")
+			);
+			configManager.runImpl();
+			assertEquals(1, gateway.calls.get());
+			assertEquals(
+				"/api/v1/device/" + TestWifiClient.SERIAL + "/configure",
+				gateway.requestPath
+			);
+			UCentralApConfiguration delivered = new UCentralApConfiguration(
+				gateway.requestBody.get("configuration").getAsString()
+			);
+			assertEquals(
+				40,
+				delivered.getRadioConfig(0).get("channel-width").getAsInt()
+			);
+			assertEquals(
+				6,
+				delivered.getRadioConfig(0).get("channel").getAsInt()
+			);
+			assertEquals(
+				17,
+				delivered.getRadioConfig(0).get("tx-power").getAsInt()
+			);
+			assertEquals(
+				TestWifiClient.SERIAL,
+				gateway.requestBody.get("serialNumber").getAsString()
+			);
+			assertEquals("synthetic-gateway-key", gateway.apiKey);
+		}
+	}
+
+	@Test
+	void wifiScanEndpointUsesRealSdkAgainstMockGateway() throws Exception {
+		wifiTopology();
+		try (MockOWGWService gateway = new MockOWGWService()) {
+			gateway.connect(wifiClient);
+			wifiClient.useHttpCommands = true;
+			gateway.responseBody =
+				gson.toJson(TestWifiClient.accepted("wifiscan"));
+			assertEquals(202, wifiPost().asString().getStatus());
+			assertEquals(1, gateway.calls.get());
+			assertFalse(gateway.requestBody.get("verbose").getAsBoolean());
+			gateway.responseBody = "{\"errorCode\":1}";
+			assertEquals(502, wifiPost().asString().getStatus());
+			gateway.responseBody = "null";
+			assertEquals(502, wifiPost().asString().getStatus());
+			gateway.responseBody = "{\"errorCode\":0,\"status\":\"timedout\"}";
+			assertEquals(504, wifiPost().asString().getStatus());
+			assertEquals(4, gateway.calls.get());
+		}
+	}
+
+	@Test
+	void wifiScanCommandAcceptanceAndFailures() {
+		wifiTopology();
+		String key = Utils.generateServiceKey(rrmConfig.serviceConfig);
+		assertEquals(
+			404,
+			Unirest.post(endpoint("/api/v1/device/unknown/wifiScan"))
+				.header("X-INTERNAL-NAME", "mcp-test")
+				.header("X-API-KEY", key)
+				.asString()
+				.getStatus()
+		);
+		assertEquals(
+			400,
+			Unirest.post(endpoint("/api/v1/device/bad.serial/wifiScan"))
+				.header("X-INTERNAL-NAME", "mcp-test")
+				.header("X-API-KEY", key)
+				.asString()
+				.getStatus()
+		);
+		DeviceConfig settings = new DeviceConfig();
+		settings.enableWifiScan = false;
+		deviceDataManager.setDeviceApConfig(TestWifiClient.SERIAL, settings);
+		assertEquals(202, wifiPost().asString().getStatus());
+		assertEquals(1, wifiClient.scanCalls);
+		assertFalse(wifiClient.scanVerbose);
+		wifiClient.scanResult.status = null;
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult.status = "pending";
+		wifiClient.scanResult.errorCode = 1;
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult = null;
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult =
+			new com.facebook.openwifi.cloudsdk.models.gw.CommandInfo();
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult = TestWifiClient.accepted("wifiscan");
+		wifiClient.scanResult.serialNumber = "other-device";
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult.serialNumber = TestWifiClient.SERIAL;
+		wifiClient.scanResult.status = "failed";
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanResult.status = "timedout";
+		assertEquals(504, wifiPost().asString().getStatus());
+		wifiClient.scanFailure =
+			new RuntimeException(new java.net.SocketTimeoutException("test"));
+		assertEquals(504, wifiPost().asString().getStatus());
+		wifiClient.scanFailure = new RuntimeException("connection refused");
+		assertEquals(502, wifiPost().asString().getStatus());
+		wifiClient.scanFailure = null;
+		wifiClient.devices.get(0).connected = false;
+		int calls = wifiClient.scanCalls;
+		assertEquals(409, wifiPost().asString().getStatus());
+		assertEquals(calls, wifiClient.scanCalls);
+		wifiClient.devices = null;
+		assertEquals(503, wifiPost().asString().getStatus());
+	}
+
+	@Test
+	void wifiResultsMapOnlyLatestDeviceBatchIncludingEmptyAndStale() {
+		wifiTopology();
+		assertEquals(404, wifiResults(TestWifiClient.SERIAL).getStatus());
+		assertEquals(202, wifiPost().asString().getStatus());
+		String payload =
+			"{\"status\":{\"scan\":[{\"ssid\":\"ExampleSSID\",\"bssid\":\"AA:BB:CC:DD:EE:FF\",\"channel\":6,\"signal\":-55,\"capability\":0,\"ies\":[]}]}}";
+		long timestamp =
+			java.time.Instant.parse("2026-07-09T06:00:00Z").toEpochMilli();
+		modeler.processData(
+			modeler.new InputData(
+				Modeler.InputDataType.WIFISCAN,
+				Arrays.asList(
+					new KafkaRecord(
+						TestWifiClient.SERIAL,
+						gson.fromJson(payload, JsonObject.class),
+						timestamp
+					)
+				)
+			)
+		);
+		HttpResponse<String> response = wifiResults(TestWifiClient.SERIAL);
+		assertEquals(200, response.getStatus());
+		JSONObject result = new JSONObject(response.getBody());
+		assertEquals(
+			new TreeSet<>(Arrays.asList("timestamp", "networks")),
+			result.keySet()
+		);
+		assertEquals("2026-07-09T06:00:00Z", result.getString("timestamp"));
+		JSONObject network = result.getJSONArray("networks").getJSONObject(0);
+		assertEquals(
+			new TreeSet<>(
+				Arrays.asList("ssid", "bssid", "channel", "signal", "encryption")
+			),
+			network.keySet()
+		);
+		assertEquals("ExampleSSID", network.getString("ssid"));
+		assertEquals("AA:BB:CC:DD:EE:FF", network.getString("bssid"));
+		assertEquals(6, network.getInt("channel"));
+		assertEquals(-55, network.getInt("signal"));
+		assertEquals("OPEN", network.getString("encryption"));
+		// An older scan arriving later must not replace the API snapshot.
+		modeler.processData(
+			modeler.new InputData(
+				Modeler.InputDataType.WIFISCAN,
+				Arrays.asList(
+					new KafkaRecord(
+						TestWifiClient.SERIAL,
+						gson.fromJson(
+							"{\"status\":{\"scan\":[]}}",
+							JsonObject.class
+						),
+						timestamp - 500
+					)
+				)
+			)
+		);
+		assertEquals(
+			result.toMap(),
+			new JSONObject(wifiResults(TestWifiClient.SERIAL).getBody()).toMap()
+		);
+		assertEquals(404, wifiResults("other-device").getStatus());
+		assertEquals(404, wifiResults("unknown").getStatus());
+		modeler.processData(
+			modeler.new InputData(
+				Modeler.InputDataType.WIFISCAN,
+				Arrays.asList(
+					new KafkaRecord(
+						TestWifiClient.SERIAL,
+						gson.fromJson(
+							"{\"status\":{\"scan\":[]}}",
+							JsonObject.class
+						),
+						timestamp + 1
+					)
+				)
+			)
+		);
+		result = new JSONObject(wifiResults(TestWifiClient.SERIAL).getBody());
+		assertEquals("2026-07-09T06:00:00.001Z", result.getString("timestamp"));
+		assertTrue(result.getJSONArray("networks").isEmpty());
+		assertEquals(1, wifiClient.scanCalls);
+	}
+
+	@Test
+	@Tag("auth")
+	void wifiEndpointsAlwaysRequirePrivateListenerAndServiceCredentials() {
+		wifiTopology();
+		String base = "/api/v1/device/" + TestWifiClient.SERIAL;
+		String key = Utils.generateServiceKey(rrmConfig.serviceConfig);
+		for (boolean internal : Arrays.asList(true, false)) {
+			assertEquals(
+				403,
+				Unirest.get(endpoint(base + "/wifiScanResults", internal)).asString().getStatus()
+			);
+			assertEquals(
+				403,
+				Unirest.post(endpoint(base + "/wifiScan", internal)).asString().getStatus()
+			);
+			assertEquals(
+				403,
+				Unirest.put(endpoint(base + "/wifi/bandwidth", internal)).body("{}").asString().getStatus()
+			);
+		}
+		assertEquals(
+			403,
+			Unirest.get(endpoint(base + "/wifiScanResults"))
+				.header("X-INTERNAL-NAME", "mcp-test")
+				.header("X-API-KEY", "invalid")
+				.asString()
+				.getStatus()
+		);
+		assertEquals(
+			403,
+			Unirest.post(endpoint(base + "/wifiScan", false))
+				.header("X-INTERNAL-NAME", "mcp-test")
+				.header("X-API-KEY", key)
+				.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+				.asString()
+				.getStatus()
+		);
+		assertEquals(0, wifiClient.scanCalls);
+		owSecService.addToken("wifi-test-token", 300);
+		assertEquals(
+			403,
+			Unirest.get(endpoint(base + "/wifiScanResults", false))
+				.header("Authorization", "Bearer wifi-test-token")
+				.asString()
+				.getStatus()
+		);
+	}
+
+	@Test
+	void wifiBandwidthRejectsUnsupportedRadioAndPolicy() {
+		wifiTopology();
+		String body = "{\"band\":\"2g\",\"bandwidth\":\"HT40\"}";
+		DeviceConfig settings = new DeviceConfig();
+		settings.allowedChannelWidths =
+			java.util.Collections.singletonMap("2G", Arrays.asList(20));
+		deviceDataManager.setDeviceApConfig(TestWifiClient.SERIAL, settings);
+		assertEquals(
+			422,
+			wifiPut(TestWifiClient.SERIAL).body(body).asString().getStatus()
+		);
+		deviceDataManager.setDeviceApConfig(TestWifiClient.SERIAL, null);
+		wifiClient.capabilities.capabilities.wifi.get("phy0").htmode =
+			new String[] { "HT20" };
+		assertEquals(
+			422,
+			wifiPut(TestWifiClient.SERIAL).body(body).asString().getStatus()
+		);
+		wifiClient.devices.get(0).configuration.getAsJsonArray("radios")
+			.remove(0);
+		assertEquals(
+			422,
+			wifiPut(TestWifiClient.SERIAL).body(body).asString().getStatus()
+		);
+		assertNull(
+			deviceDataManager.getDeviceConfig(TestWifiClient.SERIAL).userChannelWidths
 		);
 	}
 
@@ -612,6 +1179,17 @@ public class ApiServerTest {
 			jsonResp.getBody().getObject().getJSONObject("paths");
 		assertFalse(paths.isEmpty());
 		assertTrue(paths.keys().next().startsWith("/api/"));
+		assertTrue(paths.has("/api/v1/device/{serialNumber}/zone"));
+		JSONObject scans = paths
+			.getJSONObject("/api/v1/device/{serialNumber}/wifiScan")
+			.getJSONObject("post");
+		assertFalse(scans.has("requestBody"));
+		JSONObject results = paths
+			.getJSONObject("/api/v1/device/{serialNumber}/wifiScanResults")
+			.getJSONObject("get");
+		assertFalse(results.has("requestBody"));
+		assertTrue(results.has("parameters"));
+		assertTrue(paths.has("/api/v1/device/{serialNumber}/wifi/bandwidth"));
 	}
 
 	@Test
@@ -769,6 +1347,19 @@ public class ApiServerTest {
 		HttpResponse<String> resp =
 			Unirest.get(endpoint("/api/v1/getTopology", false)).asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Endpoint restricted to internal inter-service communication",
+			new JSONObject(resp.getBody()).getString("error")
+		);
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.body("{}")
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// bad token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
@@ -779,11 +1370,70 @@ public class ApiServerTest {
 		// valid for 300 seconds (5 minutes)
 		String token = "this_is_a_good_token";
 		owSecService.addToken(token, 300);
+		DeviceTopology topology = new DeviceTopology();
+		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
+		deviceDataManager.setTopology(topology);
+		String originalTopologyJson = deviceDataManager.getTopologyJson();
+		DeviceTopology maliciousTopology = new DeviceTopology();
+		maliciousTopology.put(
+			"malicious-zone",
+			new TreeSet<>(Arrays.asList("AP-MALICIOUS"))
+		);
 		// good token
 		resp = Unirest.get(endpoint("/api/v1/getTopology", false))
 			.header("Authorization", "Bearer " + token)
 			.asString();
-		assertEquals(200, resp.getStatus());
+		assertEquals(403, resp.getStatus());
+		// public endpoint cannot access internal-only device zone lookup, even with good token
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
+			.header("Authorization", "Bearer " + token)
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Endpoint restricted to internal inter-service communication",
+			new JSONObject(resp.getBody()).getString("error")
+		);
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("Authorization", "Bearer " + token)
+			.body(gson.toJson(maliciousTopology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(originalTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("AP-MALICIOUS"));
+
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		resp = Unirest
+			.get(endpoint("/api/v1/getTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", false))
+			.header("X-Forwarded-Host", "localhost:" + TEST_INTERNAL_PORT)
+			.header("X-Forwarded-Port", String.valueOf(TEST_INTERNAL_PORT))
+			.header("Forwarded", "host=localhost:" + TEST_INTERNAL_PORT)
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(maliciousTopology))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(originalTopologyJson, deviceDataManager.getTopologyJson());
+		assertNull(deviceDataManager.getZoneForSerial("AP-MALICIOUS"));
 	}
 
 	@Test
@@ -794,6 +1444,19 @@ public class ApiServerTest {
 		HttpResponse<String> resp =
 			Unirest.get(endpoint("/api/v1/getTopology", true)).asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest
+			.get(endpoint("/api/v1/device/AP-001/zone", true))
+			.asString();
+		assertEquals(403, resp.getStatus());
+		assertEquals(
+			"Forbidden",
+			new JSONObject(resp.getBody()).getString("error")
+		);
+		resp = Unirest
+			.post(endpoint("/api/v1/setTopology", true))
+			.body("{}")
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// bad headers
 		resp = Unirest.get(endpoint("/api/v1/getTopology", true))
@@ -801,15 +1464,47 @@ public class ApiServerTest {
 			.header("X-API-KEY", "not_a_valid_key")
 			.asString();
 		assertEquals(403, resp.getStatus());
+		resp = Unirest.post(endpoint("/api/v1/setTopology", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", "not_a_valid_key")
+			.body("{}")
+			.asString();
+		assertEquals(403, resp.getStatus());
 
 		// good headers
+		final String validKey =
+			Utils.generateServiceKey(rrmConfig.serviceConfig);
+		DeviceTopology topology = new DeviceTopology();
+		topology.put("test-zone", new TreeSet<>(Arrays.asList("AP-001")));
+		deviceDataManager.setTopology(topology);
+
 		resp = Unirest.get(endpoint("/api/v1/getTopology", true))
 			.header("X-INTERNAL-NAME", "internal_name")
-			.header(
-				"X-API-KEY",
-				Utils.generateServiceKey(rrmConfig.serviceConfig)
-			)
+			.header("X-API-KEY", validKey)
 			.asString();
 		assertEquals(200, resp.getStatus());
+		assertEquals(deviceDataManager.getTopologyJson(), resp.getBody());
+
+		resp = Unirest.get(endpoint("/api/v1/device/AP-001/zone", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.asString();
+		assertEquals(200, resp.getStatus());
+
+		DeviceTopology updatedTopology = new DeviceTopology();
+		updatedTopology.put(
+			"updated-zone",
+			new TreeSet<>(Arrays.asList("AP-UPDATED"))
+		);
+		resp = Unirest.post(endpoint("/api/v1/setTopology", true))
+			.header("X-INTERNAL-NAME", "internal_name")
+			.header("X-API-KEY", validKey)
+			.body(gson.toJson(updatedTopology))
+			.asString();
+		assertEquals(200, resp.getStatus());
+		assertEquals(
+			gson.toJson(updatedTopology),
+			deviceDataManager.getTopologyJson()
+		);
 	}
 }
